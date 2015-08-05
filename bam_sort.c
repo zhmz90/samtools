@@ -1,9 +1,10 @@
 /*  bam_sort.c -- sorting and merging.
 
-    Copyright (C) 2008-2014 Genome Research Ltd.
+    Copyright (C) 2008-2015 Genome Research Ltd.
     Portions copyright (C) 2009-2012 Broad Institute.
 
     Author: Heng Li <lh3@sanger.ac.uk>
+    Author: Martin Pollard <mp15@sanger.ac.uk>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -139,85 +140,55 @@ static void trans_tbl_destroy(trans_tbl_t *tbl) {
     kh_destroy(c2c,tbl->pg_trans);
 }
 
+// scan text_in, copying all lines beginning with the string header_type to
+// the buffer output_pointer. Return a pointer to the first unused position in
+// output_pointer after the last copied newline.
+static char *copy_headers(char *output_pointer, const char *header_type, char *text_in) {
+    char *begin_pointer;
+    const char *end_pointer = text_in;
+    while ((begin_pointer = strstr(end_pointer, header_type))) {
+        end_pointer = strchr(begin_pointer, '\n');
+        // Copy header line, provided the match was at the start of the line
+        if (begin_pointer == text_in || *(begin_pointer - 1) == '\n') {
+            size_t length = end_pointer - begin_pointer + 1;
+            memcpy(output_pointer, begin_pointer, length);
+            output_pointer += length;
+            *begin_pointer = '#';  // Mark header as copied
+        }
+    }
+    return output_pointer;
+}
+
 // Takes in existing header and rewrites it in the usual order HD, SQ, RG, PG CO, other
 static void pretty_header(char** text_in_out, int32_t text_len)
 {
-    char* output, *output_pointer;
+    char *output, *output_pointer;
     output = output_pointer = (char*)calloc(1,text_len+1);
     output[text_len] = '\0';
 
     // Read @HD and write
-    regex_t hd_regex, sq_regex, pg_regex, rg_regex, co_regex, other_regex;
-    regmatch_t matches[1];
-    if (regcomp( &hd_regex, "^@HD.*$", REG_EXTENDED|REG_NEWLINE ))
-        abort();
-    if (regexec( &hd_regex, *text_in_out, 1, &matches[0], 0 ) == 0) {
-        size_t match_size = matches[0].rm_eo - matches[0].rm_so;
-        memcpy(output_pointer, *text_in_out+matches[0].rm_so, match_size);
-        output_pointer[match_size] = '\n';
-        output_pointer += match_size + 1;
-    }
-    regfree(&hd_regex);
+    output_pointer = copy_headers(output_pointer, "@HD", *text_in_out);
 
     // Read @SQ's and write
-    if (regcomp( &sq_regex, "^@SQ.*$", REG_EXTENDED|REG_NEWLINE )) abort();
-    char* sq_pointer = *text_in_out;
-    while (*text_in_out+text_len > sq_pointer && regexec( &sq_regex, sq_pointer, 1, &matches[0], 0) == 0) {
-        size_t match_size = matches[0].rm_eo - matches[0].rm_so;
-        memcpy(output_pointer, sq_pointer+matches[0].rm_so, match_size);
-        output_pointer[match_size] = '\n';
-        output_pointer += match_size + 1;
-        sq_pointer += matches[0].rm_eo + 1;
-    }
-    regfree(&sq_regex);
+    output_pointer = copy_headers(output_pointer, "@SQ", *text_in_out);
 
     // Read @RG's and write
-    if (regcomp( &rg_regex, "^@RG.*$", REG_EXTENDED|REG_NEWLINE )) abort();
-    char* rg_pointer = *text_in_out;
-    while (*text_in_out+text_len > rg_pointer && regexec( &rg_regex, rg_pointer, 1, &matches[0], 0) == 0) {
-        size_t match_size = matches[0].rm_eo - matches[0].rm_so;
-        memcpy(output_pointer, rg_pointer+matches[0].rm_so, match_size);
-        output_pointer[match_size] = '\n';
-        output_pointer += match_size + 1;
-        rg_pointer += matches[0].rm_eo + 1;
-    }
-    regfree(&rg_regex);
+    output_pointer = copy_headers(output_pointer, "@RG", *text_in_out);
 
     // Read @PG's and write
-    if (regcomp( &pg_regex, "^@PG.*$", REG_EXTENDED|REG_NEWLINE )) abort();
-    char* pg_pointer = *text_in_out;
-    while (*text_in_out+text_len > pg_pointer && regexec( &pg_regex, pg_pointer, 1, &matches[0], 0) == 0) {
-        size_t match_size = matches[0].rm_eo - matches[0].rm_so;
-        memcpy(output_pointer, pg_pointer+matches[0].rm_so, match_size);
-        output_pointer[match_size] = '\n';
-        output_pointer += match_size + 1;
-        pg_pointer += matches[0].rm_eo + 1;
-    }
-    regfree(&pg_regex);
+    output_pointer = copy_headers(output_pointer, "@PG", *text_in_out);
 
-    // Read @CO's and write
-    if (regcomp( &co_regex, "^@CO.*$", REG_EXTENDED|REG_NEWLINE )) abort();
-    char* co_pointer = *text_in_out;
-    while (*text_in_out+text_len > co_pointer && regexec( &co_regex, co_pointer, 1, &matches[0], 0) == 0) {
-        size_t match_size = matches[0].rm_eo - matches[0].rm_so;
-        memcpy(output_pointer, co_pointer+matches[0].rm_so, match_size);
-        output_pointer[match_size] = '\n';
-        output_pointer += match_size + 1;
-        co_pointer += matches[0].rm_eo + 1;
+    // Read any other headers (including @CO) and write
+    char *line, *end_pointer;
+    for (line = *text_in_out; *line; line = end_pointer + 1) {
+        end_pointer = strchr(line, '\n');
+        if (end_pointer == NULL) abort();
+        if (line[0] == '@') {
+            size_t length = end_pointer - line + 1;
+            memcpy(output_pointer, line, length);
+            output_pointer += length;
+        }
     }
-    regfree(&co_regex);
-
-    // Read any other not HD,SQ,RG,PG,CO tags and write
-    if (regcomp( &other_regex, "^@([^HSCPR]|H[^D]|S[^Q]|[PR][^G]|C[^O]).*$", REG_EXTENDED|REG_NEWLINE )) abort();
-    char* other_pointer = *text_in_out;
-    while (*text_in_out+text_len > other_pointer && regexec( &other_regex, other_pointer, 1, &matches[0], 0) == 0) {
-        size_t match_size = matches[0].rm_eo - matches[0].rm_so;
-        memcpy(output_pointer, other_pointer+matches[0].rm_so, match_size);
-        output_pointer[match_size] = '\n';
-        output_pointer += match_size + 1;
-        other_pointer += matches[0].rm_eo + 1;
-    }
-    regfree(&other_regex);
 
     // Safety check, make sure we copied it all, if we didn't something is wrong with the header
     if ( output+text_len != output_pointer ) {
@@ -228,7 +199,7 @@ static void pretty_header(char** text_in_out, int32_t text_len)
     *text_in_out = output;
 }
 
-static void trans_tbl_init(bam_hdr_t* out, bam_hdr_t* translate, trans_tbl_t* tbl, bool merge_rg, bool merge_pg)
+static void trans_tbl_init(bam_hdr_t* out, bam_hdr_t* translate, trans_tbl_t* tbl, bool merge_rg, bool merge_pg, const char* rg_override)
 {
     tbl->n_targets = translate->n_targets;
     tbl->tid_trans = (int*)calloc(translate->n_targets, sizeof(int));
@@ -252,6 +223,29 @@ static void trans_tbl_init(bam_hdr_t* out, bam_hdr_t* translate, trans_tbl_t* tb
         kh_value(out_tid, iter) = i;
     }
 
+    // @HD
+    {
+        regex_t hd;
+        regmatch_t* matches = (regmatch_t*)calloc(2, sizeof(regmatch_t));
+        regmatch_t* matches_2 = (regmatch_t*)calloc(2, sizeof(regmatch_t));
+        if (matches == NULL) { perror("out of memory"); exit(-1); }
+        regcomp(&hd, "^@HD.*", REG_EXTENDED|REG_NEWLINE);
+        if (regexec(&hd, translate->text, 1, matches, 0) != 0)
+        {
+            fprintf(stderr, "No @HD tag found.\n");
+            exit(1);
+        }
+        // Only add @HD tag if not already in output
+        if (regexec(&hd, out->text, 1, matches_2, 0) != 0)
+        {
+            kputsn(translate->text+matches[0].rm_so, matches[0].rm_eo-matches[0].rm_so, &out_text);
+        } // TODO: handle case when @HD needs merging.
+        regfree(&hd);
+        free(matches_2);
+        free(matches);
+    }
+
+    // SQ
     for (i = 0; i < translate->n_targets; ++i) {
         khiter_t iter = kh_get(c2i, out_tid, translate->target_name[i]);
 
@@ -300,7 +294,8 @@ static void trans_tbl_init(bam_hdr_t* out, bam_hdr_t* translate, trans_tbl_t* tb
     regcomp(&rg_id, "^@RG.*\tID:([!-)+-<>-~][ !-~]*)(\t.*$|$)", REG_EXTENDED|REG_NEWLINE);
     char* text = translate->text;
     klist_t(hdrln) *rg_list = kl_init(hdrln);
-    while(1) { //   foreach rg id in translate's header
+    bool loop = true;
+    while(loop) { //   foreach rg id in translate's header
         if (regexec(&rg_id, text, 2, matches, 0) != 0) break;
         // matches[0] is the whole @RG line; matches[1] is the ID field value
         kstring_t match_id = { 0, 0, NULL };
@@ -313,15 +308,26 @@ static void trans_tbl_init(bam_hdr_t* out, bam_hdr_t* translate, trans_tbl_t* tb
         regcomp(&rg_id_search, rg_regex.s, REG_EXTENDED|REG_NEWLINE|REG_NOSUB);
         free(rg_regex.s);
         kstring_t transformed_id = { 0, 0, NULL };
-        bool transformed_equals_match;
-        if (regexec(&rg_id_search, out->text, 0, NULL, 0) != 0  || merge_rg) {
-            // Not in there so can add it as 1-1 mapping
-            kputs(match_id.s, &transformed_id);
-            transformed_equals_match = true;
-        } else {
-            // It's in there so we need to transform it by appending random number to id
-            ksprintf(&transformed_id, "%s-%0lX", match_id.s, lrand48());
+        bool transformed_equals_match; // Have we changed the ID of this line?
+        bool not_found_in_output; // Do we need to add this line to our output?
+        not_found_in_output = regexec(&rg_id_search, out->text, 0, NULL, 0) == REG_NOMATCH;
+
+        if (rg_override) {
+            // If we're overriding RG terminate the loop early
+            kputs(rg_override, &transformed_id);
             transformed_equals_match = false;
+            rg_override = NULL;
+            loop = false;
+        } else {
+            if ( not_found_in_output || merge_rg) {
+                // Not in there so can add it as 1-1 mapping
+                kputs(match_id.s, &transformed_id);
+                transformed_equals_match = true;
+            } else {
+                // It's in there so we need to transform it by appending random number to id
+                ksprintf(&transformed_id, "%s-%0lX", match_id.s, lrand48());
+                transformed_equals_match = false;
+            }
         }
         regfree(&rg_id_search);
 
@@ -340,7 +346,8 @@ static void trans_tbl_init(bam_hdr_t* out, bam_hdr_t* translate, trans_tbl_t* tb
             kputsn(text+matches[1].rm_eo, matches[0].rm_eo-matches[1].rm_eo, &transformed_line);
         }
 
-        if (!(transformed_equals_match && merge_rg)) {
+        // Does this line need to go into our output header?
+        if (!(transformed_equals_match && merge_rg && !not_found_in_output)) {
             // append line to linked list for PG processing
             char** ln = kl_pushp(hdrln, rg_list);
             *ln = ks_release(&transformed_line);  // Give away to linked list
@@ -350,6 +357,14 @@ static void trans_tbl_init(bam_hdr_t* out, bam_hdr_t* translate, trans_tbl_t* tb
         text += matches[0].rm_eo; // next!
     }
     regfree(&rg_id);
+
+    // If there are no RG lines in the file and we are overriding add one
+    if (rg_override && kl_begin(rg_list) == NULL) {
+        char* line = (char *) malloc(7 + strlen(rg_override) + 1);
+        sprintf(line, "@RG\tID:%s", rg_override);
+        char** ln = kl_pushp(hdrln, rg_list);
+        *ln = line;
+    }
 
     // Do same for PG id's
     regex_t pg_id;
@@ -368,8 +383,10 @@ static void trans_tbl_init(bam_hdr_t* out, bam_hdr_t* translate, trans_tbl_t* tb
         regcomp(&pg_id_search, pg_regex.s, REG_EXTENDED|REG_NEWLINE|REG_NOSUB);
         free(pg_regex.s);
         kstring_t transformed_id = { 0, 0, NULL };
-        bool transformed_equals_match;
-        if (regexec(&pg_id_search, out->text, 0, NULL, 0) != 0 || merge_pg) {
+        bool transformed_equals_match; // Have we changed the ID of this line?
+        bool not_found_in_output; // Do we need to add this line to our output?
+        not_found_in_output = regexec(&pg_id_search, out->text, 0, NULL, 0) == REG_NOMATCH;
+        if (not_found_in_output || merge_pg) {
             // Not in there so can add it as 1-1 mapping
             kputs(match_id.s, &transformed_id);
             transformed_equals_match = true;
@@ -395,7 +412,8 @@ static void trans_tbl_init(bam_hdr_t* out, bam_hdr_t* translate, trans_tbl_t* tb
             kputsn(text+matches[1].rm_eo, matches[0].rm_eo-matches[1].rm_eo, &transformed_line);
         }
 
-        if (!(transformed_equals_match && merge_pg)) {
+        // Does this line need to go into our output header?
+        if (!(transformed_equals_match && merge_pg && !not_found_in_output)) {
             // append line to linked list for PP processing
             char** ln = kl_pushp(hdrln, pg_list);
             *ln = ks_release(&transformed_line);  // Give away to linked list
@@ -474,6 +492,18 @@ static void trans_tbl_init(bam_hdr_t* out, bam_hdr_t* translate, trans_tbl_t* tb
     kl_destroy(hdrln,pg_list);
     kl_destroy(hdrln,rg_list);
     free(matches);
+
+    // Just append @CO headers without translation
+    const char *line, *end_pointer;
+    for (line = translate->text; *line; line = end_pointer + 1) {
+        end_pointer = strchr(line, '\n');
+        if (strncmp(line, "@CO", 3) == 0) {
+            kputc('\n', &out_text);
+            if (end_pointer) kputsn(line, end_pointer - line, &out_text);
+            else kputs(line, &out_text);
+        }
+        if (end_pointer == NULL) break;
+    }
 
     // Add trailing \n and write back to header
     free(out->text);
@@ -604,6 +634,14 @@ int bam_merge_core2(int by_qname, const char *out, const char *mode, const char 
         }
         hout = sam_hdr_read(fpheaders);
         sam_close(fpheaders);
+        if (hout == NULL) {
+            fprintf(stderr, "[bam_merge_core] couldn't read headers for '%s'\n",
+                    headers);
+            return -1;
+        }
+    } else  {
+        hout = bam_hdr_init();
+        hout->text = strdup("");
     }
 
     g_is_by_qname = by_qname;
@@ -612,14 +650,15 @@ int bam_merge_core2(int by_qname, const char *out, const char *mode, const char 
     iter = (hts_itr_t**)calloc(n, sizeof(hts_itr_t*));
     hdr = (bam_hdr_t**)calloc(n, sizeof(bam_hdr_t*));
     translation_tbl = (trans_tbl_t*)calloc(n, sizeof(trans_tbl_t));
+    RG = (char**)calloc(n, sizeof(char*));
     // prepare RG tag from file names
     if (flag & MERGE_RG) {
-        RG = (char**)calloc(n, sizeof(char*));
         RG_len = (int*)calloc(n, sizeof(int));
         for (i = 0; i != n; ++i) {
             int l = strlen(fn[i]);
             const char *s = fn[i];
-            if (l > 4 && strcmp(s + l - 4, ".bam") == 0) l -= 4;
+            if (l > 4 && (strcmp(s + l - 4, ".bam") == 0 || strcmp(s + l - 4, ".sam") == 0)) l -= 4;
+            if (l > 5 && strcmp(s + l - 5, ".cram") == 0) l -= 5;
             for (j = l - 1; j >= 0; --j) if (s[j] == '/') break;
             ++j; l -= j;
             RG[i] = (char*)calloc(l + 1, 1);
@@ -634,20 +673,28 @@ int bam_merge_core2(int by_qname, const char *out, const char *mode, const char 
         if (fp[i] == NULL) {
             int j;
             fprintf(stderr, "[bam_merge_core] fail to open file %s\n", fn[i]);
-            for (j = 0; j < i; ++j) sam_close(fp[j]);
+            for (j = 0; j < i; ++j) {
+                bam_hdr_destroy(hdr[i]);
+                sam_close(fp[j]);
+            }
             free(fp); free(heap);
             // FIXME: possible memory leak
             return -1;
         }
         hin = sam_hdr_read(fp[i]);
-        if (hout)
-            trans_tbl_init(hout, hin, translation_tbl+i, flag & MERGE_COMBINE_RG, flag & MERGE_COMBINE_PG);
-        else {
-            // As yet, no headers to merge into...
-            hout = bam_hdr_dup(hin);
-            // ...so no need to translate header into itself
-            trans_tbl_init(hout, hin, translation_tbl+i, true, true);
+        if (hin == NULL) {
+            fprintf(stderr, "[bam_merge_core] failed to read header for '%s'\n",
+                    fn[i]);
+            for (j = 0; j < i; ++j) {
+                bam_hdr_destroy(hdr[i]);
+                sam_close(fp[j]);
+            }
+            free(fp); free(heap);
+            // FIXME: possible memory leak
+            return -1;
         }
+
+        trans_tbl_init(hout, hin, translation_tbl+i, flag & MERGE_COMBINE_RG, flag & MERGE_COMBINE_PG, RG[i]);
 
         // TODO sam_itr_next() doesn't yet work for SAM files,
         // so for those keep the headers around for use with sam_read1()
@@ -690,6 +737,11 @@ int bam_merge_core2(int by_qname, const char *out, const char *mode, const char 
             hts_idx_t *idx = sam_index_load(fp[i], fn[i]);
             // (rtrans[i*n+tid]) Look up what hout tid translates to in input tid space
             int mapped_tid = rtrans[i*hout->n_targets+tid];
+            if (idx == NULL) {
+                fprintf(stderr, "[%s] failed to load index for %s.  Random alignment retrieval only works for indexed BAM or CRAM files.\n",
+                        __func__, fn[i]);
+                return -1;
+            }
             if (mapped_tid != INT32_MIN) {
                 iter[i] = sam_itr_queryi(idx, mapped_tid, beg, end);
             } else {
@@ -764,7 +816,7 @@ int bam_merge_core2(int by_qname, const char *out, const char *mode, const char 
     // Clean up and close
     if (flag & MERGE_RG) {
         for (i = 0; i != n; ++i) free(RG[i]);
-        free(RG); free(RG_len);
+        free(RG_len);
     }
     for (i = 0; i < n; ++i) {
         trans_tbl_destroy(translation_tbl + i);
@@ -774,7 +826,7 @@ int bam_merge_core2(int by_qname, const char *out, const char *mode, const char 
     }
     bam_hdr_destroy(hout);
     sam_close(fpout);
-    free(translation_tbl); free(fp); free(heap); free(iter); free(hdr);
+    free(RG); free(translation_tbl); free(fp); free(heap); free(iter); free(hdr);
     return 0;
 }
 
@@ -789,7 +841,7 @@ int bam_merge_core(int by_qname, const char *out, const char *headers, int n, ch
 
 static void merge_usage(FILE *to)
 {
-    fprintf(to, "Usage:   samtools merge [-nurlf] [-h inh.sam] [-b <bamlist.fofn>] <out.bam> <in1.bam> <in2.bam> [<in3.bam> ... <inN.bam>]\n\n");
+    fprintf(to, "Usage:   samtools merge [-nurlf] [-h inh.sam] [-b <bamlist.fofn>] <out.bam> <in1.bam> [<in2.bam> <in3.bam> ... <inN.bam>]\n\n");
     fprintf(to, "Options: -n       sort by read names\n");
     fprintf(to, "         -r       attach RG tag (inferred from file names)\n");
     fprintf(to, "         -u       uncompressed BAM output\n");
@@ -874,8 +926,8 @@ int bam_merge(int argc, char *argv[])
         if (fn == NULL) { ret = 1; goto end; }
         memcpy(fn+fn_size, argv + (optind+1), nargcfiles * sizeof(char*));
     }
-    if (fn_size+nargcfiles < 2) {
-        fprintf(stderr, "You must specify at least 2 input files.\n");
+    if (fn_size+nargcfiles < 1) {
+        fprintf(stderr, "You must specify at least one (and usually two or more) input files.\n");
         merge_usage(stderr);
         return 1;
     }
@@ -1026,9 +1078,9 @@ static int sort_blocks(int n_files, size_t k, bam1_p *buf, const char *prefix, c
  */
 int bam_sort_core_ext(int is_by_qname, const char *fn, const char *prefix, const char *fnout, const char *modeout, size_t _max_mem, int n_threads)
 {
-    int ret, i, n_files = 0;
+    int ret = -1, i, n_files = 0;
     size_t mem, max_k, k, max_mem;
-    bam_hdr_t *header;
+    bam_hdr_t *header = NULL;
     samFile *fp;
     bam1_t *b, **buf;
 
@@ -1043,6 +1095,10 @@ int bam_sort_core_ext(int is_by_qname, const char *fn, const char *prefix, const
         return -1;
     }
     header = sam_hdr_read(fp);
+    if (header == NULL) {
+        fprintf(stderr, "[bam_sort_core] failed to read header for '%s'\n", fn);
+        goto err;
+    }
     if (is_by_qname) change_SO(header, "queryname");
     else change_SO(header, "coordinate");
     // write sub files
@@ -1068,8 +1124,12 @@ int bam_sort_core_ext(int is_by_qname, const char *fn, const char *prefix, const
             mem = k = 0;
         }
     }
-    if (ret != -1)
-        fprintf(stderr, "[bam_sort_core] truncated file. Continue anyway.\n");
+    if (ret != -1) {
+        fprintf(stderr, "[bam_sort_core] truncated file. Aborting.\n");
+        ret = -1;
+        goto err;
+    }
+
     // write the final output
     if (n_files == 0) { // a single block
         ks_mergesort(sort, k, buf, 0);
@@ -1086,7 +1146,7 @@ int bam_sort_core_ext(int is_by_qname, const char *fn, const char *prefix, const
         if (bam_merge_core2(is_by_qname, fnout, modeout, NULL, n_files, fns, MERGE_COMBINE_RG|MERGE_COMBINE_PG, NULL, n_threads) < 0) {
             // Propagate bam_merge_core2() failure; it has already emitted a
             // message explaining the failure, so no further message is needed.
-            return -1;
+            goto err;
         }
         for (i = 0; i < n_files; ++i) {
             unlink(fns[i]);
@@ -1094,12 +1154,16 @@ int bam_sort_core_ext(int is_by_qname, const char *fn, const char *prefix, const
         }
         free(fns);
     }
+
+    ret = 0;
+
+ err:
     // free
     for (k = 0; k < max_k; ++k) bam_destroy1(buf[k]);
     free(buf);
     bam_hdr_destroy(header);
     sam_close(fp);
-    return 0;
+    return ret;
 }
 
 int bam_sort_core(int is_by_qname, const char *fn, const char *prefix, size_t max_mem)
